@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Local Microsoft Entra/MSAL token cache
+.msal-cache/

@@ -1,0 +1,24 @@
+{
+  "name": "m365-copilot-openai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local OpenAI Chat Completions gateway for the Microsoft 365 Copilot Chat API.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.0"
+  }
+}
