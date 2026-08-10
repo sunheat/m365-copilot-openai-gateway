@@ -1,0 +1,51 @@
+import { describe, expect, it } from "vitest";
+import type { AuthService } from "../src/auth.js";
+import type { GatewayConfig } from "../src/config.js";
+import type { CopilotClient } from "../src/graph-copilot.js";
+import { buildServer } from "../src/server.js";
+
+const config: GatewayConfig = {
+  tenantId: "00000000-0000-0000-0000-000000000001",
+  clientId: "00000000-0000-0000-0000-000000000002",
+  host: "127.0.0.1",
+  port: 8787,
+  timeZone: "Australia/Sydney",
+  tokenCacheDirectory: "C:/test/cache",
+  graphBaseUrl: "https://graph.microsoft.com/beta",
+};
+
+const auth: AuthService = {
+  getAccessToken: async () => "test-token",
+  loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+};
+
+const copilot: CopilotClient = {
+  createConversation: async () => ({ id: "conversation-123" }),
+  chat: async () => ({ messages: [{ text: "Gateway test successful." }] }),
+};
+
+describe("gateway server", () => {
+  it("returns a Copilot answer using the OpenAI chat completion shape", async () => {
+    const app = buildServer({ config, auth, copilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any-client-model", messages: [{ role: "user", content: "Hello" }] },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBe("Gateway test successful.");
+    await app.close();
+  });
+
+  it("rejects phase-1 streaming requests explicitly", async () => {
+    const app = buildServer({ config, auth, copilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", stream: true, messages: [{ role: "user", content: "Hello" }] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("streaming_not_supported");
+    await app.close();
+  });
+});
