@@ -19,6 +19,9 @@ Implemented locally on `codex/phase-1-gateway` (not committed):
 
 Streaming and OpenAI tool calling deliberately return clear `400` errors in this phase. Microsoft Graph Copilot Chat does not expose native OpenAI-style function calls, so tool support needs a separate gateway-side protocol.
 
+The proposed native Graph-to-OpenAI streaming architecture is documented in
+[Phase 2 SSE Streaming Design](docs/phase-2-sse-streaming-design.md).
+
 ## Local setup
 
 1. Copy `.env.example` to `.env` and set `M365_TENANT_ID` and `M365_CLIENT_ID` from your Microsoft Entra app registration. Keep `GATEWAY_HOST=127.0.0.1`.
