@@ -9,7 +9,7 @@ const environmentSchema = z.object({
   GATEWAY_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   GATEWAY_API_KEY: z.string().optional(),
   M365_TIME_ZONE: z.string().min(1).default("Australia/Sydney"),
-  M365_TOKEN_CACHE_DIR: z.string().optional(),
+  M365_TOKEN_CACHE_DIR: z.string().optional().transform((value) => value === "" ? undefined : value),
   GRAPH_BASE_URL: z.url().default("https://graph.microsoft.com/beta"),
 });
 

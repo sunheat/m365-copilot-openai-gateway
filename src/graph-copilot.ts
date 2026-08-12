@@ -5,6 +5,7 @@ export class GraphCopilotError extends Error {
   public constructor(
     public readonly statusCode: number,
     message: string,
+    public readonly retryAfter?: string,
   ) {
     super(message);
     this.name = "GraphCopilotError";
@@ -31,7 +32,11 @@ export function createCopilotClient(config: GatewayConfig, fetcher: typeof fetch
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new GraphCopilotError(response.status, `Microsoft Graph request failed (${response.status}): ${detail.slice(0, 500)}`);
+      throw new GraphCopilotError(
+        response.status,
+        `Microsoft Graph request failed (${response.status}): ${detail.slice(0, 500)}`,
+        response.headers.get("retry-after") ?? undefined,
+      );
     }
     return (await response.json()) as T;
   }

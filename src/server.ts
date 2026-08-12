@@ -91,6 +91,14 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
         });
       }
       if (error instanceof GraphCopilotError) {
+        if (error.statusCode === 429) {
+          if (error.retryAfter !== undefined) {
+            reply.header("retry-after", error.retryAfter);
+          }
+          return reply.code(429).send({
+            error: { message: "Microsoft Graph Copilot is rate limiting requests.", type: "rate_limit_error", code: "rate_limit_exceeded" },
+          });
+        }
         return reply.code(502).send({
           error: { message: "Microsoft Graph Copilot request failed.", type: "api_error", code: `graph_${error.statusCode}` },
         });

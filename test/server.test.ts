@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { InteractionRequiredAuthError } from "@azure/msal-node";
 import type { AuthService } from "../src/auth.js";
 import type { GatewayConfig } from "../src/config.js";
-import type { CopilotClient } from "../src/graph-copilot.js";
+import { GraphCopilotError, type CopilotClient } from "../src/graph-copilot.js";
 import { buildServer } from "../src/server.js";
 
 const config: GatewayConfig = {
@@ -66,6 +66,27 @@ describe("gateway server", () => {
 
     expect(response.statusCode).toBe(401);
     expect(response.json().error.code).toBe("m365_login_required");
+    await app.close();
+  });
+
+  it("preserves Graph throttling as a rate-limit response with Retry-After", async () => {
+    const throttledCopilot: CopilotClient = {
+      createConversation: async () => {
+        throw new GraphCopilotError(429, "throttled", "30");
+      },
+      chat: async () => ({ messages: [{ text: "unreachable" }] }),
+    };
+    const app = buildServer({ config, auth, copilot: throttledCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.headers["retry-after"]).toBe("30");
+    expect(response.json().error.type).toBe("rate_limit_error");
+    expect(response.json().error.code).toBe("rate_limit_exceeded");
     await app.close();
   });
 });
