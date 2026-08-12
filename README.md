@@ -7,17 +7,17 @@ The gateway is designed for a single signed-in developer on `127.0.0.1`. It
 uses delegated Microsoft Entra authentication and never exposes Microsoft Graph
 tokens to the IDE client.
 
-## Phase 1 status
+## Gateway status
 
-Implemented locally on `codex/phase-1-gateway` (not committed):
+Implemented locally:
 
 - `GET /health`
 - `GET /v1/models` exposing `m365-copilot-preview`
-- `POST /v1/chat/completions` for text-only, non-streaming requests
+- `POST /v1/chat/completions` for text-only requests, including native SSE streaming when `stream: true`
 - Microsoft Entra delegated device-code sign-in with an encrypted, current-user MSAL token cache on Windows
 - A new Graph Copilot conversation per request and web grounding disabled on every turn
 
-Streaming and OpenAI tool calling deliberately return clear `400` errors in this phase. Microsoft Graph Copilot Chat does not expose native OpenAI-style function calls, so tool support needs a separate gateway-side protocol.
+The streaming path calls Microsoft Graph's native `chatOverStream` endpoint, converts cumulative snapshots into OpenAI-compatible content deltas, and ends successful responses with a `finish_reason` chunk followed by `[DONE]`. `stream_options.include_usage` is accepted but no fabricated token usage is emitted because Graph does not provide token counts. OpenAI tool calling remains unsupported and needs a separate gateway-side protocol.
 
 The proposed native Graph-to-OpenAI streaming architecture is documented in
 [Phase 2 SSE Streaming Design](docs/phase-2-sse-streaming-design.md).

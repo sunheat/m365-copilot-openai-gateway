@@ -30,6 +30,10 @@ export interface GraphChatResponse {
   messages?: GraphChatMessage[];
 }
 
+export interface GraphChatStreamEvent {
+  copilotConversation: GraphChatResponse;
+}
+
 export interface OpenAIChatCompletion {
   id: string;
   object: "chat.completion";
@@ -39,5 +43,20 @@ export interface OpenAIChatCompletion {
     index: number;
     message: { role: "assistant"; content: string };
     finish_reason: "stop";
+  }>;
+}
+
+export interface OpenAIChatCompletionChunk {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: 0;
+    delta: {
+      role?: "assistant";
+      content?: string;
+    };
+    finish_reason: "stop" | null;
   }>;
 }

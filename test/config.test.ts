@@ -15,5 +15,9 @@ describe("loadConfig", () => {
     expect(config.tokenCacheDirectory).toBe(
       path.join(homedir(), ".m365-copilot-openai-gateway", "msal-cache"),
     );
+    expect(config.graphStreamStartTimeoutMs).toBe(30_000);
+    expect(config.graphStreamIdleTimeoutMs).toBe(60_000);
+    expect(config.graphStreamMaxEventBytes).toBe(2 * 1024 * 1024);
+    expect(config.gatewaySseHeartbeatMs).toBe(15_000);
   });
 });
