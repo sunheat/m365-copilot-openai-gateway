@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   InteractionRequiredAuthError,
@@ -30,7 +31,12 @@ export interface AuthService {
   loginWithDeviceCode(onMessage: (message: string) => void): Promise<{ username: string }>;
 }
 
+export async function ensureTokenCacheDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true });
+}
+
 export async function createAuthService(config: GatewayConfig): Promise<AuthService> {
+  await ensureTokenCacheDirectory(config.tokenCacheDirectory);
   const cachePath = path.join(config.tokenCacheDirectory, "msal-cache.json");
   const persistence = await PersistenceCreator.createPersistence({
     cachePath,
