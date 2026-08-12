@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { z } from "zod";
-import { AuthenticationRequiredError, createAuthService, type AuthService } from "./auth.js";
+import { createAuthService, isAuthenticationRequiredError, type AuthService } from "./auth.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { createCopilotClient, GraphCopilotError, type CopilotClient } from "./graph-copilot.js";
 import { GATEWAY_MODEL_ID, toOpenAICompletion } from "./openai-mapper.js";
@@ -85,7 +85,7 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
       const graphResponse = await dependencies.copilot.chat(token, conversation.id, flattenMessages(input.messages));
       return reply.send(toOpenAICompletion(conversation, graphResponse));
     } catch (error) {
-      if (error instanceof AuthenticationRequiredError) {
+      if (isAuthenticationRequiredError(error)) {
         return reply.code(401).send({
           error: { message: error.message, type: "authentication_error", code: "m365_login_required" },
         });

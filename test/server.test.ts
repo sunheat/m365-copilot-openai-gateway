@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { InteractionRequiredAuthError } from "@azure/msal-node";
 import type { AuthService } from "../src/auth.js";
 import type { GatewayConfig } from "../src/config.js";
 import type { CopilotClient } from "../src/graph-copilot.js";
@@ -46,6 +47,25 @@ describe("gateway server", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("streaming_not_supported");
+    await app.close();
+  });
+
+  it("maps MSAL interaction-required failures to a login-required response", async () => {
+    const authRequiringInteraction: AuthService = {
+      getAccessToken: async () => {
+        throw new InteractionRequiredAuthError("interaction_required", "test-correlation");
+      },
+      loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+    };
+    const app = buildServer({ config, auth: authRequiringInteraction, copilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe("m365_login_required");
     await app.close();
   });
 });

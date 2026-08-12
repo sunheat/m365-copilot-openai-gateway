@@ -1,5 +1,9 @@
 import path from "node:path";
-import { PublicClientApplication, type AccountInfo } from "@azure/msal-node";
+import {
+  InteractionRequiredAuthError,
+  PublicClientApplication,
+  type AccountInfo,
+} from "@azure/msal-node";
 import {
   DataProtectionScope,
   PersistenceCachePlugin,
@@ -13,6 +17,12 @@ export class AuthenticationRequiredError extends Error {
     super("Sign in is required. Run npm run auth:login before starting the gateway.");
     this.name = "AuthenticationRequiredError";
   }
+}
+
+export function isAuthenticationRequiredError(
+  error: unknown,
+): error is AuthenticationRequiredError | InteractionRequiredAuthError {
+  return error instanceof AuthenticationRequiredError || error instanceof InteractionRequiredAuthError;
 }
 
 export interface AuthService {
@@ -48,14 +58,21 @@ export async function createAuthService(config: GatewayConfig): Promise<AuthServ
 
   return {
     async getAccessToken(): Promise<string> {
-      const result = await application.acquireTokenSilent({
-        account: await account(),
-        scopes: [...COPILOT_DELEGATED_SCOPES],
-      });
-      if (!result?.accessToken) {
-        throw new AuthenticationRequiredError();
+      try {
+        const result = await application.acquireTokenSilent({
+          account: await account(),
+          scopes: [...COPILOT_DELEGATED_SCOPES],
+        });
+        if (!result?.accessToken) {
+          throw new AuthenticationRequiredError();
+        }
+        return result.accessToken;
+      } catch (error) {
+        if (error instanceof InteractionRequiredAuthError) {
+          throw new AuthenticationRequiredError();
+        }
+        throw error;
       }
-      return result.accessToken;
     },
 
     async loginWithDeviceCode(onMessage: (message: string) => void): Promise<{ username: string }> {
