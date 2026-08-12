@@ -369,7 +369,6 @@ async function streamChatCompletion(
     } finally {
       clearTimeout(errorWriteTimer);
     }
-    completed = true;
     cleanup();
     reply.raw.end();
     return reply;

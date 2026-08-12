@@ -141,6 +141,33 @@ describe("gateway server", () => {
     await app.close();
   });
 
+  it("closes the upstream iterator after a projection error", async () => {
+    let iteratorClosed = false;
+    const divergentCopilot: CopilotClient = {
+      ...copilot,
+      chatStream: async () => (async function* () {
+        try {
+          yield { copilotConversation: { messages: [{ text: "Hello" }] } };
+          yield { copilotConversation: { messages: [{ text: "Goodbye" }] } };
+        } finally {
+          iteratorClosed = true;
+        }
+      })(),
+    };
+    const app = buildServer({ config: { ...config, gatewaySseHeartbeatMs: 0 }, auth, copilot: divergentCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", stream: true, messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('"code":"stream_protocol_error"');
+    expect(response.body).not.toContain("[DONE]");
+    expect(iteratorClosed).toBe(true);
+    await app.close();
+  });
+
   it("turns an upstream idle timeout into a safe incomplete-stream error", async () => {
     const idleCopilot: CopilotClient = {
       ...copilot,
