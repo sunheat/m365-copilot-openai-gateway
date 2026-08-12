@@ -50,6 +50,29 @@ describe("gateway server", () => {
     await app.close();
   });
 
+  it("allows an empty tools list for a text-only request", async () => {
+    const app = buildServer({ config, auth, copilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", tools: [], messages: [{ role: "user", content: "Hello" }] },
+    });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("rejects non-empty tool definitions explicitly", async () => {
+    const app = buildServer({ config, auth, copilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", tools: [{ type: "function" }], messages: [{ role: "user", content: "Hello" }] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("tools_not_supported");
+    await app.close();
+  });
+
   it("maps MSAL interaction-required failures to a login-required response", async () => {
     const authRequiringInteraction: AuthService = {
       getAccessToken: async () => {

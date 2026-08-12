@@ -17,7 +17,7 @@ const chatRequestSchema = z.object({
     tool_call_id: z.string().optional(),
   })).min(1),
   stream: z.boolean().optional(),
-  tools: z.unknown().optional(),
+  tools: z.array(z.unknown()).optional(),
 });
 
 export interface GatewayDependencies {
@@ -69,7 +69,7 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
         },
       });
     }
-    if (input.tools !== undefined) {
+    if (input.tools && input.tools.length > 0) {
       return reply.code(400).send({
         error: {
           message: "OpenAI tool calling is planned but is not implemented in phase 1.",

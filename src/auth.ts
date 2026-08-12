@@ -14,8 +14,8 @@ import type { GatewayConfig } from "./config.js";
 import { COPILOT_DELEGATED_SCOPES } from "./types.js";
 
 export class AuthenticationRequiredError extends Error {
-  public constructor() {
-    super("Sign in is required. Run npm run auth:login before starting the gateway.");
+  public constructor(message = "Sign in is required. Run npm run auth:login before starting the gateway.") {
+    super(message);
     this.name = "AuthenticationRequiredError";
   }
 }
@@ -33,6 +33,19 @@ export interface AuthService {
 
 export async function ensureTokenCacheDirectory(directory: string): Promise<void> {
   await mkdir(directory, { recursive: true });
+}
+
+export function selectSingleAccount(accounts: AccountInfo[]): AccountInfo {
+  const [account] = accounts;
+  if (!account) {
+    throw new AuthenticationRequiredError();
+  }
+  if (accounts.length > 1) {
+    throw new AuthenticationRequiredError(
+      "Multiple cached accounts were found. Run npm run auth:login to select an account.",
+    );
+  }
+  return account;
 }
 
 export async function createAuthService(config: GatewayConfig): Promise<AuthService> {
@@ -54,12 +67,7 @@ export async function createAuthService(config: GatewayConfig): Promise<AuthServ
   });
 
   async function account(): Promise<AccountInfo> {
-    const accounts = await application.getTokenCache().getAllAccounts();
-    const firstAccount = accounts[0];
-    if (!firstAccount) {
-      throw new AuthenticationRequiredError();
-    }
-    return firstAccount;
+    return selectSingleAccount(await application.getTokenCache().getAllAccounts());
   }
 
   return {
@@ -90,6 +98,12 @@ export async function createAuthService(config: GatewayConfig): Promise<AuthServ
       });
       if (!result?.account?.username) {
         throw new Error("Microsoft Entra sign-in completed without a user account.");
+      }
+      const cache = application.getTokenCache();
+      for (const cachedAccount of await cache.getAllAccounts()) {
+        if (cachedAccount.homeAccountId !== result.account.homeAccountId) {
+          await cache.removeAccount(cachedAccount);
+        }
       }
       return { username: result.account.username };
     },
