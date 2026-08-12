@@ -1,9 +1,11 @@
+import { EventEmitter } from "node:events";
+import type { ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { InteractionRequiredAuthError } from "@azure/msal-node";
 import type { AuthService } from "../src/auth.js";
 import type { GatewayConfig } from "../src/config.js";
 import { GraphCopilotError, type CopilotClient } from "../src/graph-copilot.js";
-import { buildServer } from "../src/server.js";
+import { buildServer, writeSse } from "../src/server.js";
 
 const config: GatewayConfig = {
   tenantId: "00000000-0000-0000-0000-000000000001",
@@ -172,6 +174,11 @@ describe("gateway server", () => {
       chatStream: async (_token, _conversationId, _prompt, signal) => (async function* () {
         yield { copilotConversation: { messages: [{ text: "Partial" }] } };
         await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            upstreamAborted = true;
+            resolve();
+            return;
+          }
           signal.addEventListener("abort", () => {
             upstreamAborted = true;
             resolve();
@@ -195,6 +202,57 @@ describe("gateway server", () => {
 
     await app.close();
     expect(upstreamAborted).toBe(true);
+  });
+
+  it("applies the start deadline and abort signal while creating a conversation", async () => {
+    let conversationAborted = false;
+    const stalledCopilot: CopilotClient = {
+      ...copilot,
+      createConversation: async (_token, signal) => new Promise((resolve) => {
+        if (!signal) throw new Error("Streaming conversation creation did not receive an AbortSignal.");
+        if (signal.aborted) {
+          conversationAborted = true;
+          resolve({ id: "conversation-123" });
+          return;
+        }
+        signal.addEventListener("abort", () => {
+          conversationAborted = true;
+          resolve({ id: "conversation-123" });
+        }, { once: true });
+      }),
+    };
+    const app = buildServer({
+      config: { ...config, graphStreamStartTimeoutMs: 10, gatewaySseHeartbeatMs: 0 },
+      auth,
+      copilot: stalledCopilot,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", stream: true, messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(conversationAborted).toBe(true);
+    await app.close();
+  });
+
+  it("releases a backpressure wait when its abort signal fires", async () => {
+    class BackpressuredResponse extends EventEmitter {
+      public destroyed = false;
+      public writableEnded = false;
+
+      public write(): boolean {
+        return false;
+      }
+    }
+
+    const response = new BackpressuredResponse() as unknown as ServerResponse;
+    const controller = new AbortController();
+    const pending = writeSse(response, "data: test\n\n", controller.signal);
+    controller.abort();
+
+    await expect(pending).rejects.toThrow("downstream client disconnected");
   });
 
   it("aborts the upstream stream when the downstream client disconnects", async () => {

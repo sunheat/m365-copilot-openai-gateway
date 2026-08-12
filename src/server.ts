@@ -89,12 +89,13 @@ function sendGatewayError(reply: FastifyReply, error: unknown): FastifyReply {
   });
 }
 
-function waitForDrain(response: ServerResponse): Promise<void> {
+function waitForDrain(response: ServerResponse, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       response.removeListener("drain", onDrain);
       response.removeListener("close", onClose);
       response.removeListener("error", onError);
+      signal.removeEventListener("abort", onAbort);
     };
     const onDrain = (): void => {
       cleanup();
@@ -108,18 +109,27 @@ function waitForDrain(response: ServerResponse): Promise<void> {
       cleanup();
       reject(new StreamClientDisconnectedError());
     };
+    const onAbort = (): void => {
+      cleanup();
+      reject(new StreamClientDisconnectedError());
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
     response.once("drain", onDrain);
     response.once("close", onClose);
     response.once("error", onError);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-async function writeSse(response: ServerResponse, data: string): Promise<void> {
-  if (response.destroyed || response.writableEnded) {
+export async function writeSse(response: ServerResponse, data: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || response.destroyed || response.writableEnded) {
     throw new StreamClientDisconnectedError();
   }
   if (!response.write(data)) {
-    await waitForDrain(response);
+    await waitForDrain(response, signal);
   }
 }
 
@@ -183,37 +193,37 @@ async function streamChatCompletion(
   input: z.infer<typeof chatRequestSchema>,
   request: FastifyRequest,
   reply: FastifyReply,
-  activeStreams: Set<AbortController>,
+  activeStreams: Set<() => void>,
 ): Promise<FastifyReply | void> {
   const controller = new AbortController();
-  activeStreams.add(controller);
   let clientDisconnected = false;
   let downstreamStarted = false;
   let completed = false;
   let startTimer: ReturnType<typeof setTimeout> | undefined;
   let rejectStart: ((error: unknown) => void) | undefined;
   let iterator: AsyncIterator<GraphChatStreamEvent> | undefined;
+  const abortForCancellation = (): void => {
+    controller.abort();
+    rejectStart?.(new StreamClientDisconnectedError());
+    if (!reply.raw.destroyed) reply.raw.destroy();
+  };
+  activeStreams.add(abortForCancellation);
 
   const onClientDisconnect = (): void => {
     clientDisconnected = true;
-    controller.abort();
-    rejectStart?.(new StreamClientDisconnectedError());
+    abortForCancellation();
   };
   const cleanup = (): void => {
     request.raw.removeListener("aborted", onClientDisconnect);
     reply.raw.removeListener("close", onClientDisconnect);
     if (startTimer !== undefined) clearTimeout(startTimer);
-    activeStreams.delete(controller);
+    activeStreams.delete(abortForCancellation);
   };
 
   request.raw.once("aborted", onClientDisconnect);
   reply.raw.once("close", onClientDisconnect);
 
   try {
-    const token = await dependencies.auth.getAccessToken();
-    if (clientDisconnected) return;
-    const conversation = await dependencies.copilot.createConversation(token);
-    if (clientDisconnected) return;
     const startTimeout = new Promise<never>((_, reject) => {
       startTimer = setTimeout(() => {
         controller.abort();
@@ -223,6 +233,18 @@ async function streamChatCompletion(
     const disconnected = new Promise<never>((_, reject) => {
       rejectStart = reject;
     });
+    const token = await Promise.race([
+      dependencies.auth.getAccessToken(),
+      startTimeout,
+      disconnected,
+    ]);
+    if (clientDisconnected) return;
+    const conversation = await Promise.race([
+      dependencies.copilot.createConversation(token, controller.signal),
+      startTimeout,
+      disconnected,
+    ]);
+    if (clientDisconnected) return;
     const graphStream = await Promise.race([
       dependencies.copilot.chatStream(token, conversation.id, flattenMessages(input.messages), controller.signal),
       startTimeout,
@@ -243,23 +265,23 @@ async function streamChatCompletion(
     const projector = createStreamProjector(conversation);
     const roleChunk = projector.roleChunk();
     if (roleChunk) {
-      await writeSse(reply.raw, serializeSseData(roleChunk));
+      await writeSse(reply.raw, serializeSseData(roleChunk), controller.signal);
     }
 
     iterator = graphStream[Symbol.asyncIterator]();
     while (true) {
       const result = await nextStreamEvent(iterator, dependencies.config, async () => {
-        await writeSse(reply.raw, ": keep-alive\n\n");
+        await writeSse(reply.raw, ": keep-alive\n\n", controller.signal);
       });
       if (result.done) break;
       const contentChunk = projector.contentChunk(result.value.copilotConversation);
       if (contentChunk) {
-        await writeSse(reply.raw, serializeSseData(contentChunk));
+        await writeSse(reply.raw, serializeSseData(contentChunk), controller.signal);
       }
     }
 
-    await writeSse(reply.raw, serializeSseData(projector.finalChunk()));
-    await writeSse(reply.raw, serializeSseData("[DONE]"));
+    await writeSse(reply.raw, serializeSseData(projector.finalChunk()), controller.signal);
+    await writeSse(reply.raw, serializeSseData("[DONE]"), controller.signal);
     completed = true;
     cleanup();
     reply.raw.end();
@@ -272,7 +294,6 @@ async function streamChatCompletion(
       return sendGatewayError(reply, error);
     }
 
-    controller.abort();
     try {
       await writeSse(reply.raw, serializeSseData({
         error: {
@@ -280,10 +301,11 @@ async function streamChatCompletion(
           type: "api_error",
           code: streamErrorCode(error),
         },
-      }));
+      }), controller.signal);
     } catch {
       // The downstream connection may have closed while the error was being written.
     }
+    controller.abort();
     completed = true;
     cleanup();
     reply.raw.end();
@@ -305,10 +327,10 @@ async function streamChatCompletion(
 
 export function buildServer(dependencies: GatewayDependencies): FastifyInstance {
   const app = Fastify({ logger: false });
-  const activeStreams = new Set<AbortController>();
+  const activeStreams = new Set<() => void>();
 
   app.addHook("preClose", async () => {
-    for (const controller of activeStreams) controller.abort();
+    for (const abort of activeStreams) abort();
   });
 
   app.addHook("onRequest", async (request, reply) => {

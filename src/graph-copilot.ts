@@ -14,7 +14,7 @@ export class GraphCopilotError extends Error {
 }
 
 export interface CopilotClient {
-  createConversation(accessToken: string): Promise<GraphConversation>;
+  createConversation(accessToken: string, signal?: AbortSignal): Promise<GraphConversation>;
   chat(accessToken: string, conversationId: string, prompt: string): Promise<GraphChatResponse>;
   chatStream(
     accessToken: string,
@@ -56,8 +56,8 @@ export function createCopilotClient(config: GatewayConfig, fetcher: typeof fetch
   }
 
   return {
-    createConversation(accessToken) {
-      return post<GraphConversation>(accessToken, baseUrl, {});
+    createConversation(accessToken, signal) {
+      return post<GraphConversation>(accessToken, baseUrl, {}, signal ? { signal } : {});
     },
     chat(accessToken, conversationId, prompt) {
       return post<GraphChatResponse>(accessToken, `${baseUrl}/${encodeURIComponent(conversationId)}/chat`, {
