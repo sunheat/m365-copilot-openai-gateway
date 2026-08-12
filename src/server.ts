@@ -138,34 +138,37 @@ async function nextStreamEvent(
     (result) => ({ kind: "result", result }),
     (error: unknown) => ({ kind: "error", error }),
   );
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const idle = new Promise<PendingStreamResult>((resolve) => {
+    idleTimer = setTimeout(() => resolve({ kind: "timeout" }), config.graphStreamIdleTimeoutMs);
+  });
 
-  while (true) {
-    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    const heartbeat = config.gatewaySseHeartbeatMs > 0
-      ? new Promise<PendingStreamResult>((resolve) => {
-        heartbeatTimer = setTimeout(() => resolve({ kind: "heartbeat" }), config.gatewaySseHeartbeatMs);
-      })
-      : new Promise<PendingStreamResult>(() => undefined);
-    const idle = new Promise<PendingStreamResult>((resolve) => {
-      idleTimer = setTimeout(() => resolve({ kind: "timeout" }), config.graphStreamIdleTimeoutMs);
-    });
+  try {
+    while (true) {
+      let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+      const heartbeat = config.gatewaySseHeartbeatMs > 0
+        ? new Promise<PendingStreamResult>((resolve) => {
+          heartbeatTimer = setTimeout(() => resolve({ kind: "heartbeat" }), config.gatewaySseHeartbeatMs);
+        })
+        : new Promise<PendingStreamResult>(() => undefined);
 
-    const outcome = await Promise.race([pending, heartbeat, idle]);
-    if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+      const outcome = await Promise.race([pending, heartbeat, idle]);
+      if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+
+      if (outcome.kind === "heartbeat") {
+        await writeHeartbeat();
+        continue;
+      }
+      if (outcome.kind === "timeout") {
+        throw new StreamIdleTimeoutError();
+      }
+      if (outcome.kind === "error") {
+        throw outcome.error;
+      }
+      return outcome.result;
+    }
+  } finally {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
-
-    if (outcome.kind === "heartbeat") {
-      await writeHeartbeat();
-      continue;
-    }
-    if (outcome.kind === "timeout") {
-      throw new StreamIdleTimeoutError();
-    }
-    if (outcome.kind === "error") {
-      throw outcome.error;
-    }
-    return outcome.result;
   }
 }
 
@@ -304,7 +307,7 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
   const app = Fastify({ logger: false });
   const activeStreams = new Set<AbortController>();
 
-  app.addHook("onClose", async () => {
+  app.addHook("preClose", async () => {
     for (const controller of activeStreams) controller.abort();
   });
 

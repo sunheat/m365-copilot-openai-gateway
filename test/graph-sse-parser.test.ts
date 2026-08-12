@@ -88,4 +88,17 @@ describe("parseGraphSse", () => {
       }
     }).rejects.toBeInstanceOf(GraphSseParseError);
   });
+
+  it("applies the event limit independently when transport coalesces events", async () => {
+    const event = 'data: {"copilotConversation":{"messages":[]}}\n\n';
+    const events = [];
+    for await (const parsed of parseGraphSse(
+      streamFromChunks([new TextEncoder().encode(event + event)]),
+      { maxEventBytes: new TextEncoder().encode(event).byteLength },
+    )) {
+      events.push(parsed);
+    }
+
+    expect(events).toHaveLength(2);
+  });
 });

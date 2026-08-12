@@ -149,7 +149,7 @@ describe("gateway server", () => {
       })(),
     };
     const app = buildServer({
-      config: { ...config, graphStreamIdleTimeoutMs: 10, gatewaySseHeartbeatMs: 0 },
+      config: { ...config, graphStreamIdleTimeoutMs: 10, gatewaySseHeartbeatMs: 5 },
       auth,
       copilot: idleCopilot,
     });
@@ -163,6 +163,38 @@ describe("gateway server", () => {
     expect(response.body).toContain('"code":"stream_idle_timeout"');
     expect(response.body).not.toContain("[DONE]");
     await app.close();
+  });
+
+  it("aborts active streams before Fastify waits during shutdown", async () => {
+    let upstreamAborted = false;
+    const shutdownCopilot: CopilotClient = {
+      ...copilot,
+      chatStream: async (_token, _conversationId, _prompt, signal) => (async function* () {
+        yield { copilotConversation: { messages: [{ text: "Partial" }] } };
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            upstreamAborted = true;
+            resolve();
+          }, { once: true });
+        });
+      })(),
+    };
+    const app = buildServer({ config: { ...config, gatewaySseHeartbeatMs: 0 }, auth, copilot: shutdownCopilot });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address.");
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "any", stream: true, messages: [{ role: "user", content: "Hello" }] }),
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Streaming response did not expose a body.");
+    await reader.read();
+
+    await app.close();
+    expect(upstreamAborted).toBe(true);
   });
 
   it("aborts the upstream stream when the downstream client disconnects", async () => {

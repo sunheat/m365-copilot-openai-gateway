@@ -115,9 +115,6 @@ export async function* parseGraphSse(
       if (done) break;
 
       pendingLine += decoder.decode(value, { stream: true });
-      if (encoder.encode(pendingLine).byteLength + eventBytes > maxEventBytes) {
-        throw new GraphSseParseError("Microsoft Graph SSE event exceeded the configured size limit.");
-      }
 
       while (true) {
         const newline = pendingLine.indexOf("\n");
@@ -127,9 +124,16 @@ export async function* parseGraphSse(
         const event = processLine(line);
         if (event) yield event;
       }
+
+      if (encoder.encode(pendingLine).byteLength + eventBytes > maxEventBytes) {
+        throw new GraphSseParseError("Microsoft Graph SSE event exceeded the configured size limit.");
+      }
     }
 
     pendingLine += decoder.decode();
+    if (encoder.encode(pendingLine).byteLength + eventBytes > maxEventBytes) {
+      throw new GraphSseParseError("Microsoft Graph SSE event exceeded the configured size limit.");
+    }
     if (pendingLine.length > 0 || dataLines.length > 0) {
       throw new GraphSseParseError("Microsoft Graph SSE stream ended with an incomplete event.");
     }
