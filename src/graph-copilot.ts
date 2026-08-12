@@ -21,6 +21,7 @@ export interface CopilotClient {
     conversationId: string,
     prompt: string,
     signal: AbortSignal,
+    onActivity?: () => void,
   ): Promise<AsyncIterable<GraphChatStreamEvent>>;
 }
 
@@ -66,7 +67,7 @@ export function createCopilotClient(config: GatewayConfig, fetcher: typeof fetch
         contextualResources: { webContext: { isWebEnabled: false } },
       });
     },
-    async chatStream(accessToken, conversationId, prompt, signal) {
+    async chatStream(accessToken, conversationId, prompt, signal, onActivity) {
       const response = await fetcher(`${baseUrl}/${encodeURIComponent(conversationId)}/chatOverStream`, {
         method: "POST",
         headers: {
@@ -99,7 +100,10 @@ export function createCopilotClient(config: GatewayConfig, fetcher: typeof fetch
         throw new GraphCopilotError(502, "Microsoft Graph streaming response did not include a body.");
       }
 
-      return parseGraphSse(response.body, { maxEventBytes: config.graphStreamMaxEventBytes });
+      return parseGraphSse(response.body, {
+        maxEventBytes: config.graphStreamMaxEventBytes,
+        ...(onActivity ? { onActivity } : {}),
+      });
     },
   };
 }

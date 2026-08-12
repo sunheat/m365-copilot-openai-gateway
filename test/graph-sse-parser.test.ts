@@ -101,4 +101,17 @@ describe("parseGraphSse", () => {
 
     expect(events).toHaveLength(2);
   });
+
+  it("reports activity for every non-empty reader chunk", async () => {
+    let activityCount = 0;
+    const event = 'data: {"copilotConversation":{"messages":[]}}\n\n';
+    for await (const _parsed of parseGraphSse(
+      streamFromChunks([new TextEncoder().encode(":"), new TextEncoder().encode(` keep-alive\n\n${event}`)]),
+      { onActivity: () => { activityCount += 1; } },
+    )) {
+      // Consume the generator.
+    }
+
+    expect(activityCount).toBe(2);
+  });
 });

@@ -167,6 +167,33 @@ describe("gateway server", () => {
     await app.close();
   });
 
+  it("resets the idle deadline when upstream byte activity arrives", async () => {
+    const activeCopilot: CopilotClient = {
+      ...copilot,
+      chatStream: async (_token, _conversationId, _prompt, _signal, onActivity) => (async function* () {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        onActivity?.();
+        await new Promise((resolve) => setTimeout(resolve, 8));
+        yield { copilotConversation: { messages: [{ text: "Active" }] } };
+      })(),
+    };
+    const app = buildServer({
+      config: { ...config, graphStreamIdleTimeoutMs: 10, gatewaySseHeartbeatMs: 0 },
+      auth,
+      copilot: activeCopilot,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any", stream: true, messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("Active");
+    expect(response.body).toContain("[DONE]");
+    await app.close();
+  });
+
   it("aborts active streams before Fastify waits during shutdown", async () => {
     let upstreamAborted = false;
     const shutdownCopilot: CopilotClient = {

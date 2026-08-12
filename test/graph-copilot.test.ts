@@ -41,7 +41,14 @@ describe("createCopilotClient", () => {
       );
     });
 
-    const stream = await client.chatStream("test-token", "conversation/123", "prompt", new AbortController().signal);
+    let activityCount = 0;
+    const stream = await client.chatStream(
+      "test-token",
+      "conversation/123",
+      "prompt",
+      new AbortController().signal,
+      () => { activityCount += 1; },
+    );
     const events = [];
     for await (const event of stream) events.push(event);
 
@@ -49,6 +56,7 @@ describe("createCopilotClient", () => {
     expect(requestInit?.method).toBe("POST");
     expect(new Headers(requestInit?.headers).get("accept")).toBe("text/event-stream");
     expect(events[0]?.copilotConversation.messages?.[0]?.text).toBe("Hello");
+    expect(activityCount).toBe(1);
   });
 
   it("rejects a successful response with the wrong media type", async () => {

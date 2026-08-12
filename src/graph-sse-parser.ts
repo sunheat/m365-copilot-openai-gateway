@@ -11,6 +11,7 @@ export class GraphSseParseError extends Error {
 
 interface GraphSseParserOptions {
   maxEventBytes?: number;
+  onActivity?: () => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -113,6 +114,7 @@ export async function* parseGraphSse(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (value.byteLength > 0) options.onActivity?.();
 
       pendingLine += decoder.decode(value, { stream: true });
 

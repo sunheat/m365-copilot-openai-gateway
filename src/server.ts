@@ -137,22 +137,61 @@ type PendingStreamResult =
   | { kind: "result"; result: IteratorResult<GraphChatStreamEvent> }
   | { kind: "error"; error: unknown }
   | { kind: "heartbeat" }
+  | { kind: "activity" }
   | { kind: "timeout" };
+
+interface IdleDeadline {
+  start(): void;
+  activity(): void;
+  promise(): Promise<Pick<PendingStreamResult, "kind"> & ({ kind: "activity" } | { kind: "timeout" })>;
+  stop(): void;
+}
+
+function createIdleDeadline(timeoutMs: number): IdleDeadline {
+  let active = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let resolveCurrent: ((result: { kind: "activity" } | { kind: "timeout" }) => void) | undefined;
+  let current = new Promise<{ kind: "activity" } | { kind: "timeout" }>(() => undefined);
+
+  const reset = (): void => {
+    if (!active) return;
+    if (timer !== undefined) clearTimeout(timer);
+    resolveCurrent?.({ kind: "activity" });
+    current = new Promise((resolve) => {
+      resolveCurrent = resolve;
+      timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+    });
+  };
+
+  return {
+    start() {
+      active = true;
+      reset();
+    },
+    activity: reset,
+    promise() {
+      return current;
+    },
+    stop() {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+      resolveCurrent = undefined;
+    },
+  };
+}
 
 async function nextStreamEvent(
   iterator: AsyncIterator<GraphChatStreamEvent>,
   config: GatewayConfig,
   writeHeartbeat: () => Promise<void>,
+  idleDeadline: IdleDeadline,
 ): Promise<IteratorResult<GraphChatStreamEvent>> {
+  idleDeadline.start();
   const pending: Promise<PendingStreamResult> = iterator.next().then(
     (result) => ({ kind: "result", result }),
     (error: unknown) => ({ kind: "error", error }),
   );
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  const idle = new Promise<PendingStreamResult>((resolve) => {
-    idleTimer = setTimeout(() => resolve({ kind: "timeout" }), config.graphStreamIdleTimeoutMs);
-  });
-
   try {
     while (true) {
       let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
@@ -162,11 +201,14 @@ async function nextStreamEvent(
         })
         : new Promise<PendingStreamResult>(() => undefined);
 
-      const outcome = await Promise.race([pending, heartbeat, idle]);
+      const outcome = await Promise.race([pending, heartbeat, idleDeadline.promise()]);
       if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
 
       if (outcome.kind === "heartbeat") {
         await writeHeartbeat();
+        continue;
+      }
+      if (outcome.kind === "activity") {
         continue;
       }
       if (outcome.kind === "timeout") {
@@ -178,7 +220,7 @@ async function nextStreamEvent(
       return outcome.result;
     }
   } finally {
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleDeadline.stop();
   }
 }
 
@@ -196,6 +238,8 @@ async function streamChatCompletion(
   activeStreams: Set<() => void>,
 ): Promise<FastifyReply | void> {
   const controller = new AbortController();
+  const downstreamController = new AbortController();
+  const idleDeadline = createIdleDeadline(dependencies.config.graphStreamIdleTimeoutMs);
   let clientDisconnected = false;
   let downstreamStarted = false;
   let completed = false;
@@ -204,6 +248,7 @@ async function streamChatCompletion(
   let iterator: AsyncIterator<GraphChatStreamEvent> | undefined;
   const abortForCancellation = (): void => {
     controller.abort();
+    downstreamController.abort();
     rejectStart?.(new StreamClientDisconnectedError());
     if (!reply.raw.destroyed) reply.raw.destroy();
   };
@@ -217,6 +262,7 @@ async function streamChatCompletion(
     request.raw.removeListener("aborted", onClientDisconnect);
     reply.raw.removeListener("close", onClientDisconnect);
     if (startTimer !== undefined) clearTimeout(startTimer);
+    idleDeadline.stop();
     activeStreams.delete(abortForCancellation);
   };
 
@@ -246,7 +292,13 @@ async function streamChatCompletion(
     ]);
     if (clientDisconnected) return;
     const graphStream = await Promise.race([
-      dependencies.copilot.chatStream(token, conversation.id, flattenMessages(input.messages), controller.signal),
+      dependencies.copilot.chatStream(
+        token,
+        conversation.id,
+        flattenMessages(input.messages),
+        controller.signal,
+        () => idleDeadline.activity(),
+      ),
       startTimeout,
       disconnected,
     ]);
@@ -265,23 +317,28 @@ async function streamChatCompletion(
     const projector = createStreamProjector(conversation);
     const roleChunk = projector.roleChunk();
     if (roleChunk) {
-      await writeSse(reply.raw, serializeSseData(roleChunk), controller.signal);
+      await writeSse(reply.raw, serializeSseData(roleChunk), downstreamController.signal);
     }
 
     iterator = graphStream[Symbol.asyncIterator]();
     while (true) {
-      const result = await nextStreamEvent(iterator, dependencies.config, async () => {
-        await writeSse(reply.raw, ": keep-alive\n\n", controller.signal);
-      });
+      const result = await nextStreamEvent(
+        iterator,
+        dependencies.config,
+        async () => {
+          await writeSse(reply.raw, ": keep-alive\n\n", downstreamController.signal);
+        },
+        idleDeadline,
+      );
       if (result.done) break;
       const contentChunk = projector.contentChunk(result.value.copilotConversation);
       if (contentChunk) {
-        await writeSse(reply.raw, serializeSseData(contentChunk), controller.signal);
+        await writeSse(reply.raw, serializeSseData(contentChunk), downstreamController.signal);
       }
     }
 
-    await writeSse(reply.raw, serializeSseData(projector.finalChunk()), controller.signal);
-    await writeSse(reply.raw, serializeSseData("[DONE]"), controller.signal);
+    await writeSse(reply.raw, serializeSseData(projector.finalChunk()), downstreamController.signal);
+    await writeSse(reply.raw, serializeSseData("[DONE]"), downstreamController.signal);
     completed = true;
     cleanup();
     reply.raw.end();
@@ -294,6 +351,11 @@ async function streamChatCompletion(
       return sendGatewayError(reply, error);
     }
 
+    controller.abort();
+    const errorWriteTimer = setTimeout(() => {
+      downstreamController.abort();
+      if (!reply.raw.destroyed) reply.raw.destroy();
+    }, Math.min(1_000, dependencies.config.graphStreamIdleTimeoutMs));
     try {
       await writeSse(reply.raw, serializeSseData({
         error: {
@@ -301,11 +363,12 @@ async function streamChatCompletion(
           type: "api_error",
           code: streamErrorCode(error),
         },
-      }), controller.signal);
+      }), downstreamController.signal);
     } catch {
       // The downstream connection may have closed while the error was being written.
+    } finally {
+      clearTimeout(errorWriteTimer);
     }
-    controller.abort();
     completed = true;
     cleanup();
     reply.raw.end();
@@ -314,6 +377,7 @@ async function streamChatCompletion(
     cleanup();
     if (!completed) {
       controller.abort();
+      downstreamController.abort();
       if (iterator?.return) {
         try {
           await iterator.return();
