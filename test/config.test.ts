@@ -19,5 +19,7 @@ describe("loadConfig", () => {
     expect(config.graphStreamIdleTimeoutMs).toBe(60_000);
     expect(config.graphStreamMaxEventBytes).toBe(2 * 1024 * 1024);
     expect(config.gatewaySseHeartbeatMs).toBe(15_000);
+    expect(config.logLevel).toBe("info");
+    expect(config.logFormat).toBe("pretty");
   });
 });

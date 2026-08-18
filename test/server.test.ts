@@ -12,6 +12,8 @@ const config: GatewayConfig = {
   clientId: "00000000-0000-0000-0000-000000000002",
   host: "127.0.0.1",
   port: 8787,
+  logLevel: "silent",
+  logFormat: "pretty",
   timeZone: "Australia/Sydney",
   tokenCacheDirectory: "C:/test/cache",
   graphBaseUrl: "https://graph.microsoft.com/beta",
@@ -23,7 +25,7 @@ const config: GatewayConfig = {
 
 const auth: AuthService = {
   getAccessToken: async () => "test-token",
-  loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+  loginInteractively: async () => ({ username: "test@example.com" }),
 };
 
 const copilot: CopilotClient = {
@@ -43,6 +45,7 @@ describe("gateway server", () => {
       payload: { model: "any-client-model", messages: [{ role: "user", content: "Hello" }] },
     });
     expect(response.statusCode).toBe(200);
+    expect(response.headers["x-request-id"]).toBeTruthy();
     expect(response.json().choices[0].message.content).toBe("Gateway test successful.");
     await app.close();
   });
@@ -62,6 +65,7 @@ describe("gateway server", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(response.headers["x-request-id"]).toBeTruthy();
     expect(response.body).toContain('"role":"assistant"');
     expect(response.body).toContain("Gateway stream successful.");
     expect(response.body.match(/data: \[DONE\]/g)).toHaveLength(1);
@@ -371,7 +375,7 @@ describe("gateway server", () => {
       getAccessToken: async () => {
         throw new InteractionRequiredAuthError("interaction_required", "test-correlation");
       },
-      loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+      loginInteractively: async () => ({ username: "test@example.com" }),
     };
     const app = buildServer({ config, auth: authRequiringInteraction, copilot });
     const response = await app.inject({

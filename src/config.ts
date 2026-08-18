@@ -2,12 +2,20 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 
+export const GATEWAY_LOG_LEVELS = ["silent", "error", "warn", "info", "debug", "trace"] as const;
+export type GatewayLogLevel = typeof GATEWAY_LOG_LEVELS[number];
+
+export const GATEWAY_LOG_FORMATS = ["pretty", "json"] as const;
+export type GatewayLogFormat = typeof GATEWAY_LOG_FORMATS[number];
+
 const environmentSchema = z.object({
   M365_TENANT_ID: z.string().uuid(),
   M365_CLIENT_ID: z.string().uuid(),
   GATEWAY_HOST: z.string().default("127.0.0.1"),
   GATEWAY_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   GATEWAY_API_KEY: z.string().optional(),
+  GATEWAY_LOG_LEVEL: z.enum(GATEWAY_LOG_LEVELS).default("info"),
+  GATEWAY_LOG_FORMAT: z.enum(GATEWAY_LOG_FORMATS).default("pretty"),
   M365_TIME_ZONE: z.string().min(1).default("Australia/Sydney"),
   M365_TOKEN_CACHE_DIR: z.string().optional().transform((value) => value === "" ? undefined : value),
   GRAPH_BASE_URL: z.url().default("https://graph.microsoft.com/beta"),
@@ -23,6 +31,8 @@ export interface GatewayConfig {
   host: string;
   port: number;
   apiKey?: string;
+  logLevel: GatewayLogLevel;
+  logFormat: GatewayLogFormat;
   timeZone: string;
   tokenCacheDirectory: string;
   graphBaseUrl: string;
@@ -46,6 +56,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     host: env.GATEWAY_HOST,
     port: env.GATEWAY_PORT,
     ...(env.GATEWAY_API_KEY ? { apiKey: env.GATEWAY_API_KEY } : {}),
+    logLevel: env.GATEWAY_LOG_LEVEL,
+    logFormat: env.GATEWAY_LOG_FORMAT,
     timeZone: env.M365_TIME_ZONE,
     tokenCacheDirectory:
       env.M365_TOKEN_CACHE_DIR ?? path.join(homedir(), ".m365-copilot-openai-gateway", "msal-cache"),

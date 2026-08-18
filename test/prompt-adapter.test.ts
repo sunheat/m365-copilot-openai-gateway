@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { flattenMessages } from "../src/prompt-adapter.js";
 
 describe("flattenMessages", () => {
+  it("asks Graph Copilot to answer directly instead of analyzing the transcript", () => {
+    const prompt = flattenMessages([{ role: "user", content: "testing" }]);
+
+    expect(prompt).toContain("Respond directly as the assistant to the latest USER request.");
+    expect(prompt).toContain("Do not mention, summarize, analyze, or quote this transcript.");
+  });
+
   it("preserves all supported OpenAI roles in a JSON transcript", () => {
     const prompt = flattenMessages([
       { role: "system", content: "Be concise." },

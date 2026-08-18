@@ -7,6 +7,8 @@ const config: GatewayConfig = {
   clientId: "123e4567-e89b-12d3-a456-426614174001",
   host: "127.0.0.1",
   port: 8787,
+  logLevel: "silent",
+  logFormat: "pretty",
   timeZone: "Australia/Sydney",
   tokenCacheDirectory: "C:/test/cache",
   graphBaseUrl: "https://graph.microsoft.com/beta",

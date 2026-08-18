@@ -19,11 +19,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validateEvent(value: unknown): GraphChatStreamEvent {
-  if (!isRecord(value) || !isRecord(value.copilotConversation)) {
+  if (!isRecord(value)) {
     throw new GraphSseParseError("Microsoft Graph SSE event has no valid copilotConversation snapshot.");
   }
 
-  const rawMessages = value.copilotConversation.messages;
+  const conversation = "copilotConversation" in value ? value.copilotConversation : value;
+  if (!isRecord(conversation)) {
+    throw new GraphSseParseError("Microsoft Graph SSE event has no valid copilotConversation snapshot.");
+  }
+
+  const rawMessages = conversation.messages;
   if (!Array.isArray(rawMessages)) {
     throw new GraphSseParseError("Microsoft Graph SSE snapshot has no valid messages array.");
   }
@@ -52,6 +57,9 @@ function validateEvent(value: unknown): GraphChatStreamEvent {
   return { copilotConversation: { messages } };
 }
 
+const END_OF_STREAM = Symbol("end-of-stream");
+type ProcessedEvent = GraphChatStreamEvent | typeof END_OF_STREAM | undefined;
+
 /** Parse Microsoft Graph's event-stream without assuming network chunk boundaries. */
 export async function* parseGraphSse(
   body: ReadableStream<Uint8Array>,
@@ -63,17 +71,19 @@ export async function* parseGraphSse(
   const encoder = new TextEncoder();
   let pendingLine = "";
   let dataLines: string[] = [];
+  let eventType = "";
   let eventBytes = 0;
 
-  const dispatchEvent = (): GraphChatStreamEvent | undefined => {
-    if (dataLines.length === 0) {
-      eventBytes = 0;
-      return undefined;
-    }
-
+  const dispatchEvent = (): ProcessedEvent => {
+    const currentEventType = eventType;
     const data = dataLines.join("\n");
+    const hasData = dataLines.length > 0;
     dataLines = [];
+    eventType = "";
     eventBytes = 0;
+
+    if (currentEventType === "done") return END_OF_STREAM;
+    if (!hasData) return undefined;
 
     let parsed: unknown;
     try {
@@ -84,7 +94,7 @@ export async function* parseGraphSse(
     return validateEvent(parsed);
   };
 
-  const processLine = (rawLine: string): GraphChatStreamEvent | undefined => {
+  const processLine = (rawLine: string): ProcessedEvent => {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     eventBytes += encoder.encode(`${line}\n`).byteLength;
     if (eventBytes > maxEventBytes) {
@@ -106,6 +116,8 @@ export async function* parseGraphSse(
     }
     if (field === "data") {
       dataLines.push(value);
+    } else if (field === "event") {
+      eventType = value;
     }
     return undefined;
   };
@@ -124,6 +136,7 @@ export async function* parseGraphSse(
         const line = pendingLine.slice(0, newline);
         pendingLine = pendingLine.slice(newline + 1);
         const event = processLine(line);
+        if (event === END_OF_STREAM) return;
         if (event) yield event;
       }
 
