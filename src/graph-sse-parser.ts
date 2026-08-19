@@ -149,7 +149,20 @@ export async function* parseGraphSse(
     if (encoder.encode(pendingLine).byteLength + eventBytes > maxEventBytes) {
       throw new GraphSseParseError("Microsoft Graph SSE event exceeded the configured size limit.");
     }
-    if (pendingLine.length > 0 || dataLines.length > 0) {
+
+    const hadPendingLine = pendingLine.length > 0;
+    if (hadPendingLine) {
+      const event = processLine(pendingLine);
+      pendingLine = "";
+      if (event === END_OF_STREAM) return;
+      if (event) yield event;
+    }
+    if (eventType === "done") {
+      const event = dispatchEvent();
+      if (event === END_OF_STREAM) return;
+      if (event) yield event;
+    }
+    if (hadPendingLine || eventType.length > 0 || dataLines.length > 0) {
       throw new GraphSseParseError("Microsoft Graph SSE stream ended with an incomplete event.");
     }
   } catch (error) {
