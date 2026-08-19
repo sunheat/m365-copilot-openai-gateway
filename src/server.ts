@@ -553,6 +553,7 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
       const conversation = await dependencies.copilot.createConversation(token);
       logger.debug("graph_conversation_created", { request_id: id, duration_ms: elapsedMs(startedAt) });
       const graphResponse = await dependencies.copilot.chat(token, conversation.id, flattenMessages(input.messages));
+      const completion = toOpenAICompletion(conversation, graphResponse);
       const outputChars = graphResponse.messages?.reduce((total, message) => total + (message.text?.length ?? 0), 0) ?? 0;
       logger.info("request_completed", {
         request_id: id,
@@ -561,7 +562,7 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
         duration_ms: elapsedMs(startedAt),
         output_chars: outputChars,
       });
-      return reply.send(toOpenAICompletion(conversation, graphResponse));
+      return reply.send(completion);
     } catch (error) {
       logger.error("request_failed", {
         request_id: id,
