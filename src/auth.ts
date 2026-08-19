@@ -28,7 +28,7 @@ export function isAuthenticationRequiredError(
 
 export interface AuthService {
   getAccessToken(): Promise<string>;
-  loginWithDeviceCode(onMessage: (message: string) => void): Promise<{ username: string }>;
+  loginInteractively(openBrowser: (url: string) => Promise<void>): Promise<{ username: string }>;
 }
 
 export async function ensureTokenCacheDirectory(directory: string): Promise<void> {
@@ -89,12 +89,14 @@ export async function createAuthService(config: GatewayConfig): Promise<AuthServ
       }
     },
 
-    async loginWithDeviceCode(onMessage: (message: string) => void): Promise<{ username: string }> {
-      const result = await application.acquireTokenByDeviceCode({
+    async loginInteractively(openBrowser: (url: string) => Promise<void>): Promise<{ username: string }> {
+      const result = await application.acquireTokenInteractive({
         scopes: [...COPILOT_DELEGATED_SCOPES],
-        deviceCodeCallback(response) {
-          onMessage(response.message);
-        },
+        openBrowser,
+        successTemplate:
+          "Microsoft 365 sign-in completed. You can close this browser tab and return to the terminal.",
+        errorTemplate:
+          "Microsoft 365 sign-in failed. Return to the terminal for error details.",
       });
       if (!result?.account?.username) {
         throw new Error("Microsoft Entra sign-in completed without a user account.");

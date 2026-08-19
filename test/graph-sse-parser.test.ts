@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseGraphSse, GraphSseParseError } from "../src/graph-sse-parser.js";
+
+const redactedChatOverStreamFixture = readFileSync(
+  new URL("./fixtures/graph-chat-over-stream.sse", import.meta.url),
+  "utf8",
+);
 
 function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -52,6 +58,18 @@ describe("parseGraphSse", () => {
     expect(events).toHaveLength(2);
     expect(events[0]?.copilotConversation.messages?.[0]?.text).toBe("Hello");
     expect(events[1]?.copilotConversation.messages).toEqual([]);
+  });
+
+  it("accepts root-level conversation snapshots and stops on event: done", async () => {
+    const events = [];
+    for await (const event of parseGraphSse(
+      streamFromChunks([new TextEncoder().encode(redactedChatOverStreamFixture)]),
+    )) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.copilotConversation.messages?.[0]?.text ?? ""))
+      .toEqual(["", "Redacted answer", "Redacted answer with more text"]);
   });
 
   it("rejects malformed, incomplete, invalid, and oversized events", async () => {

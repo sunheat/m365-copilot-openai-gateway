@@ -1,0 +1,10 @@
+data: {"id":"00000000-0000-0000-0000-000000000000","messages":[]}
+
+id: redacted-1
+data: {"id":"00000000-0000-0000-0000-000000000000","messages":[{"text":"Redacted answer"}]}
+
+id: redacted-2
+data: {"id":"00000000-0000-0000-0000-000000000000","messages":[{"text":"Redacted answer with more text"}]}
+
+event: done
+data:

@@ -5,6 +5,7 @@ import { InteractionRequiredAuthError } from "@azure/msal-node";
 import type { AuthService } from "../src/auth.js";
 import type { GatewayConfig } from "../src/config.js";
 import { GraphCopilotError, type CopilotClient } from "../src/graph-copilot.js";
+import type { GatewayLogger } from "../src/logger.js";
 import { buildServer, writeSse } from "../src/server.js";
 
 const config: GatewayConfig = {
@@ -12,6 +13,8 @@ const config: GatewayConfig = {
   clientId: "00000000-0000-0000-0000-000000000002",
   host: "127.0.0.1",
   port: 8787,
+  logLevel: "silent",
+  logFormat: "pretty",
   timeZone: "Australia/Sydney",
   tokenCacheDirectory: "C:/test/cache",
   graphBaseUrl: "https://graph.microsoft.com/beta",
@@ -23,7 +26,7 @@ const config: GatewayConfig = {
 
 const auth: AuthService = {
   getAccessToken: async () => "test-token",
-  loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+  loginInteractively: async () => ({ username: "test@example.com" }),
 };
 
 const copilot: CopilotClient = {
@@ -43,7 +46,34 @@ describe("gateway server", () => {
       payload: { model: "any-client-model", messages: [{ role: "user", content: "Hello" }] },
     });
     expect(response.statusCode).toBe(200);
+    expect(response.headers["x-request-id"]).toBeTruthy();
     expect(response.json().choices[0].message.content).toBe("Gateway test successful.");
+    await app.close();
+  });
+
+  it("does not log sync completion before response mapping succeeds", async () => {
+    const events: string[] = [];
+    const logger: GatewayLogger = {
+      error: (event) => { events.push(`error:${event}`); },
+      warn: (event) => { events.push(`warn:${event}`); },
+      info: (event) => { events.push(`info:${event}`); },
+      debug: (event) => { events.push(`debug:${event}`); },
+      trace: (event) => { events.push(`trace:${event}`); },
+    };
+    const emptyResponseCopilot: CopilotClient = {
+      ...copilot,
+      chat: async () => ({ messages: [] }),
+    };
+    const app = buildServer({ config, auth, copilot: emptyResponseCopilot, logger });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "any-client-model", messages: [{ role: "user", content: "Hello" }] },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(events).toContain("error:request_failed");
+    expect(events).not.toContain("info:request_completed");
     await app.close();
   });
 
@@ -62,6 +92,7 @@ describe("gateway server", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(response.headers["x-request-id"]).toBeTruthy();
     expect(response.body).toContain('"role":"assistant"');
     expect(response.body).toContain("Gateway stream successful.");
     expect(response.body.match(/data: \[DONE\]/g)).toHaveLength(1);
@@ -371,7 +402,7 @@ describe("gateway server", () => {
       getAccessToken: async () => {
         throw new InteractionRequiredAuthError("interaction_required", "test-correlation");
       },
-      loginWithDeviceCode: async () => ({ username: "test@example.com" }),
+      loginInteractively: async () => ({ username: "test@example.com" }),
     };
     const app = buildServer({ config, auth: authRequiringInteraction, copilot });
     const response = await app.inject({
