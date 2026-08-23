@@ -2,6 +2,7 @@ import type {
   GraphChatResponse,
   GraphConversation,
   OpenAIChatCompletionChunk,
+  OpenAIFunctionToolCall,
 } from "./types.js";
 import { GATEWAY_MODEL_ID } from "./openai-mapper.js";
 
@@ -30,7 +31,7 @@ export interface StreamProjector {
 function chunk(
   state: StreamProjectionState,
   delta: OpenAIChatCompletionChunk["choices"][number]["delta"],
-  finishReason: "stop" | null,
+  finishReason: "stop" | "tool_calls" | null,
 ): OpenAIChatCompletionChunk {
   return {
     id: state.completionId,
@@ -39,6 +40,44 @@ function chunk(
     model: GATEWAY_MODEL_ID,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   };
+}
+
+export function bufferedTextChunks(
+  conversation: GraphConversation,
+  content: string,
+  created = Math.floor(Date.now() / 1_000),
+): OpenAIChatCompletionChunk[] {
+  const state: StreamProjectionState = {
+    completionId: `chatcmpl-${conversation.id}`,
+    created,
+    emittedText: content,
+    emittedRole: true,
+    emittedContent: true,
+  };
+  return [
+    chunk(state, { role: "assistant", content: "" }, null),
+    chunk(state, { content }, null),
+    chunk(state, {}, "stop"),
+  ];
+}
+
+export function bufferedToolCallChunks(
+  conversation: GraphConversation,
+  toolCall: OpenAIFunctionToolCall,
+  created = Math.floor(Date.now() / 1_000),
+): OpenAIChatCompletionChunk[] {
+  const state: StreamProjectionState = {
+    completionId: `chatcmpl-${conversation.id}`,
+    created,
+    emittedText: "",
+    emittedRole: true,
+    emittedContent: false,
+  };
+  return [
+    chunk(state, { role: "assistant", content: "" }, null),
+    chunk(state, { tool_calls: [{ index: 0, ...toolCall }] }, null),
+    chunk(state, {}, "tool_calls"),
+  ];
 }
 
 function latestText(snapshot: GraphChatResponse): string | undefined {

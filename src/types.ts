@@ -9,13 +9,44 @@ export const COPILOT_DELEGATED_SCOPES = [
   "offline_access",
 ] as const;
 
-export type OpenAIMessageRole = "system" | "user" | "assistant" | "tool";
+export type JsonObject = Record<string, unknown>;
 
-export interface OpenAIChatMessage {
-  role: OpenAIMessageRole;
-  content: string;
-  tool_call_id?: string | undefined;
+export interface OpenAIFunctionDefinition {
+  name: string;
+  description?: string;
+  parameters: JsonObject;
+  strict?: boolean;
 }
+
+export interface OpenAIFunctionTool {
+  type: "function";
+  function: OpenAIFunctionDefinition;
+}
+
+export interface OpenAIFunctionToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export type OpenAIToolChoice =
+  | "none"
+  | "auto"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
+export type OpenAIChatMessage =
+  | { role: "system" | "user"; content: string; name?: string | undefined }
+  | {
+    role: "assistant";
+    content: string | null;
+    name?: string | undefined;
+    tool_calls?: OpenAIFunctionToolCall[] | undefined;
+  }
+  | { role: "tool"; content: string; tool_call_id: string };
 
 export interface GraphConversation {
   id: string;
@@ -41,8 +72,12 @@ export interface OpenAIChatCompletion {
   model: string;
   choices: Array<{
     index: number;
-    message: { role: "assistant"; content: string };
-    finish_reason: "stop";
+    message: {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: OpenAIFunctionToolCall[];
+    };
+    finish_reason: "stop" | "tool_calls";
   }>;
 }
 
@@ -56,7 +91,8 @@ export interface OpenAIChatCompletionChunk {
     delta: {
       role?: "assistant";
       content?: string;
+      tool_calls?: Array<OpenAIFunctionToolCall & { index: 0 }>;
     };
-    finish_reason: "stop" | null;
+    finish_reason: "stop" | "tool_calls" | null;
   }>;
 }

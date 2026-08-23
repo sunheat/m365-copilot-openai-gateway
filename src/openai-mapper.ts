@@ -1,4 +1,9 @@
-import type { GraphChatResponse, GraphConversation, OpenAIChatCompletion } from "./types.js";
+import type {
+  GraphChatResponse,
+  GraphConversation,
+  OpenAIChatCompletion,
+  OpenAIFunctionToolCall,
+} from "./types.js";
 
 export const GATEWAY_MODEL_ID = "m365-copilot-preview";
 
@@ -16,5 +21,22 @@ export function toOpenAICompletion(
     created: Math.floor(Date.now() / 1_000),
     model: GATEWAY_MODEL_ID,
     choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+  };
+}
+
+export function toOpenAIToolCompletion(
+  conversation: GraphConversation,
+  toolCall: OpenAIFunctionToolCall,
+): OpenAIChatCompletion {
+  return {
+    id: `chatcmpl-${conversation.id}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1_000),
+    model: GATEWAY_MODEL_ID,
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content: null, tool_calls: [toolCall] },
+      finish_reason: "tool_calls",
+    }],
   };
 }

@@ -37,6 +37,26 @@ const copilot: CopilotClient = {
   })(),
 };
 
+const weatherTool = {
+  type: "function" as const,
+  function: {
+    name: "get_weather",
+    description: "Get the weather for a city.",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+      additionalProperties: false,
+    },
+  },
+};
+
+function protocolNonce(prompt: string): string {
+  const match = prompt.match(/"protocol":"m365-copilot-openai-gateway\/tool-call\/v1","nonce":"([^"]+)"/);
+  if (!match?.[1]) throw new Error("Tool protocol prompt did not contain a nonce.");
+  return match[1];
+}
+
 describe("gateway server", () => {
   it("returns a Copilot answer using the OpenAI chat completion shape", async () => {
     const app = buildServer({ config, auth, copilot });
@@ -385,15 +405,318 @@ describe("gateway server", () => {
     await app.close();
   });
 
-  it("rejects non-empty tool definitions explicitly", async () => {
+  it("maps a validated function decision to a non-streaming OpenAI tool call", async () => {
+    const toolCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => ({
+        messages: [{
+          text: JSON.stringify({
+            type: "tool_call",
+            nonce: protocolNonce(prompt),
+            name: "get_weather",
+            arguments: { city: "Sydney" },
+          }),
+        }],
+      }),
+    };
+    const app = buildServer({ config, auth, copilot: toolCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        tool_choice: { type: "function", function: { name: "get_weather" } },
+        messages: [{ role: "user", content: "What is the weather?" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBeNull();
+    expect(response.json().choices[0].message.tool_calls[0]).toMatchObject({
+      type: "function",
+      function: { name: "get_weather", arguments: '{"city":"Sydney"}' },
+    });
+    expect(response.json().choices[0].finish_reason).toBe("tool_calls");
+    await app.close();
+  });
+
+  it("maps a validated function decision to buffered OpenAI SSE chunks", async () => {
+    const toolCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => ({
+        messages: [{
+          text: JSON.stringify({
+            type: "tool_call",
+            nonce: protocolNonce(prompt),
+            name: "get_weather",
+            arguments: { city: "Sydney" },
+          }),
+        }],
+      }),
+    };
+    const app = buildServer({ config, auth, copilot: toolCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        stream: true,
+        tools: [weatherTool],
+        messages: [{ role: "user", content: "What is the weather?" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(response.body).toContain('"tool_calls":[{"index":0');
+    expect(response.body).toContain('"name":"get_weather"');
+    expect(response.body).toContain('"finish_reason":"tool_calls"');
+    expect(response.body.match(/data: \[DONE\]/g)).toHaveLength(1);
+    await app.close();
+  });
+
+  it("returns a normal final answer when auto tool choice does not need a tool", async () => {
+    const finalCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => ({
+        messages: [{
+          text: JSON.stringify({
+            type: "final",
+            nonce: protocolNonce(prompt),
+            content: "No tool needed.",
+          }),
+        }],
+      }),
+    };
+    const app = buildServer({ config, auth, copilot: finalCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        tool_choice: "auto",
+        messages: [{ role: "user", content: "Say hello." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBe("No tool needed.");
+    expect(response.json().choices[0].finish_reason).toBe("stop");
+    await app.close();
+  });
+
+  it("uses one bounded correction turn for an invalid required-tool response", async () => {
+    let nonce = "";
+    const prompts: string[] = [];
+    const correctingCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) {
+          nonce = protocolNonce(prompt);
+          return { messages: [{ text: JSON.stringify({ type: "final", nonce, content: "Not allowed." }) }] };
+        }
+        return {
+          messages: [{
+            text: JSON.stringify({
+              type: "tool_call",
+              nonce,
+              name: "get_weather",
+              arguments: { city: "Sydney" },
+            }),
+          }],
+        };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: correctingCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        tool_choice: "required",
+        messages: [{ role: "user", content: "Use the tool." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("Validation category: tool_required.");
+    expect(response.json().choices[0].finish_reason).toBe("tool_calls");
+    await app.close();
+  });
+
+  it("fails closed after one invalid correction response", async () => {
+    let callCount = 0;
+    const invalidCopilot: CopilotClient = {
+      ...copilot,
+      chat: async () => {
+        callCount += 1;
+        return { messages: [{ text: "not json" }] };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: invalidCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        messages: [{ role: "user", content: "Use the tool." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error.code).toBe("tool_protocol_error");
+    expect(callCount).toBe(2);
+    await app.close();
+  });
+
+  it("rejects invalid tool schemas before calling Microsoft Graph", async () => {
+    let graphCalled = false;
+    const trackingCopilot: CopilotClient = {
+      ...copilot,
+      createConversation: async () => {
+        graphCalled = true;
+        return { id: "conversation-123" };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: trackingCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [{
+          type: "function",
+          function: { name: "broken", parameters: { type: "not-a-json-schema-type" } },
+        }],
+        messages: [{ role: "user", content: "Hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("invalid_tool_definition");
+    expect(graphCalled).toBe(false);
+    await app.close();
+  });
+
+  it("keeps the native text path when tool_choice is none", async () => {
+    let graphPrompt = "";
+    const textCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => {
+        graphPrompt = prompt;
+        return { messages: [{ text: "Text only." }] };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: textCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        tool_choice: "none",
+        messages: [{ role: "user", content: "Hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBe("Text only.");
+    expect(graphPrompt).not.toContain("m365-copilot-openai-gateway/tool-call/v1");
+    await app.close();
+  });
+
+  it("still validates tool definitions when tool_choice is none", async () => {
+    let graphCalled = false;
+    const trackingCopilot: CopilotClient = {
+      ...copilot,
+      createConversation: async () => {
+        graphCalled = true;
+        return { id: "conversation-123" };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: trackingCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tool_choice: "none",
+        tools: [{
+          type: "function",
+          function: { name: "broken", parameters: { type: "not-a-json-schema-type" } },
+        }],
+        messages: [{ role: "user", content: "Hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("invalid_tool_definition");
+    expect(graphCalled).toBe(false);
+    await app.close();
+  });
+
+  it("rejects a required tool choice when no tools are supplied", async () => {
     const app = buildServer({ config, auth, copilot });
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      payload: { model: "any", tools: [{ type: "function" }], messages: [{ role: "user", content: "Hello" }] },
+      payload: {
+        model: "any",
+        tool_choice: "required",
+        messages: [{ role: "user", content: "Hello" }],
+      },
     });
+
     expect(response.statusCode).toBe(400);
-    expect(response.json().error.code).toBe("tools_not_supported");
+    expect(response.json().error.code).toBe("invalid_tool_definition");
+    await app.close();
+  });
+
+  it("preserves assistant tool calls and tool results in a follow-up turn", async () => {
+    let graphPrompt = "";
+    const followUpCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, prompt) => {
+        graphPrompt = prompt;
+        return {
+          messages: [{
+            text: JSON.stringify({ type: "final", nonce: protocolNonce(prompt), content: "It is sunny." }),
+          }],
+        };
+      },
+    };
+    const app = buildServer({ config, auth, copilot: followUpCopilot });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        messages: [
+          { role: "user", content: "What is the weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call-1",
+              type: "function",
+              function: { name: "get_weather", arguments: '{"city":"Sydney"}' },
+            }],
+          },
+          { role: "tool", tool_call_id: "call-1", content: '{"condition":"sunny"}' },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBe("It is sunny.");
+    expect(graphPrompt).toContain('"tool_call_id":"call-1"');
     await app.close();
   });
 

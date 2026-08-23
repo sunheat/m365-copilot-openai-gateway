@@ -8,27 +8,94 @@ import { createAuthService, isAuthenticationRequiredError, type AuthService } fr
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { createCopilotClient, GraphCopilotError, type CopilotClient } from "./graph-copilot.js";
 import { GraphSseParseError } from "./graph-sse-parser.js";
-import { GATEWAY_MODEL_ID, toOpenAICompletion } from "./openai-mapper.js";
+import { GATEWAY_MODEL_ID, toOpenAICompletion, toOpenAIToolCompletion } from "./openai-mapper.js";
 import {
+  bufferedTextChunks,
+  bufferedToolCallChunks,
   createStreamProjector,
   serializeSseData,
   StreamProjectionError,
 } from "./openai-stream.js";
-import { flattenMessages } from "./prompt-adapter.js";
+import { flattenMessages, flattenMessagesWithTools } from "./prompt-adapter.js";
 import { createGatewayLogger, type GatewayLogger, type LogFields } from "./logger.js";
-import type { GraphChatStreamEvent } from "./types.js";
+import {
+  createToolProtocol,
+  InvalidToolDefinitionError,
+  ToolProtocolError,
+  validateToolDefinitions,
+  type ToolDecision,
+  type ToolProtocol,
+} from "./tool-protocol.js";
+import type {
+  GraphChatResponse,
+  GraphChatStreamEvent,
+  GraphConversation,
+  OpenAIChatCompletion,
+  OpenAIChatCompletionChunk,
+  OpenAIFunctionTool,
+  OpenAIFunctionToolCall,
+  OpenAIToolChoice,
+} from "./types.js";
+
+const functionToolCallSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal("function"),
+  function: z.object({
+    name: z.string().min(1),
+    arguments: z.string(),
+  }),
+});
+
+const chatMessageSchema = z.discriminatedUnion("role", [
+  z.object({
+    role: z.enum(["system", "user"]),
+    content: z.string().min(1),
+    name: z.string().min(1).optional(),
+  }),
+  z.object({
+    role: z.literal("assistant"),
+    content: z.string().nullable().optional().default(null),
+    name: z.string().min(1).optional(),
+    tool_calls: z.array(functionToolCallSchema).max(1).optional(),
+  }).superRefine((message, context) => {
+    if ((message.content === null || message.content === "") && !message.tool_calls?.length) {
+      context.addIssue({ code: "custom", message: "Assistant messages require content or one tool call." });
+    }
+  }),
+  z.object({
+    role: z.literal("tool"),
+    content: z.string(),
+    tool_call_id: z.string().min(1),
+  }),
+]);
+
+const functionToolSchema = z.object({
+  type: z.literal("function"),
+  function: z.object({
+    name: z.string().min(1),
+    description: z.string().min(1).optional(),
+    parameters: z.record(z.string(), z.unknown()).default({ type: "object", properties: {} }),
+    strict: z.boolean().optional(),
+  }),
+});
+
+const toolChoiceSchema = z.union([
+  z.enum(["none", "auto", "required"]),
+  z.object({
+    type: z.literal("function"),
+    function: z.object({ name: z.string().min(1) }),
+  }),
+]);
 
 const chatRequestSchema = z.object({
   model: z.string().min(1),
-  messages: z.array(z.object({
-    role: z.enum(["system", "user", "assistant", "tool"]),
-    content: z.string().min(1),
-    tool_call_id: z.string().optional(),
-  })).min(1),
+  messages: z.array(chatMessageSchema).min(1),
   stream: z.boolean().optional(),
   stream_options: z.object({ include_usage: z.boolean().optional() }).optional(),
   n: z.literal(1).optional(),
-  tools: z.array(z.unknown()).optional(),
+  tools: z.array(functionToolSchema).max(64).optional(),
+  tool_choice: toolChoiceSchema.optional(),
+  parallel_tool_calls: z.boolean().optional(),
 });
 
 export interface GatewayDependencies {
@@ -68,6 +135,20 @@ class StreamClientDisconnectedError extends Error {
 }
 
 function sendGatewayError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof InvalidToolDefinitionError) {
+    return reply.code(400).send({
+      error: { message: error.message, type: "invalid_request_error", code: "invalid_tool_definition" },
+    });
+  }
+  if (error instanceof ToolProtocolError) {
+    return reply.code(502).send({
+      error: {
+        message: "Microsoft 365 Copilot did not produce a valid tool call response.",
+        type: "api_error",
+        code: "tool_protocol_error",
+      },
+    });
+  }
   if (isAuthenticationRequiredError(error)) {
     return reply.code(401).send({
       error: { message: error.message, type: "authentication_error", code: "m365_login_required" },
@@ -233,6 +314,8 @@ function streamErrorCode(error: unknown): string {
 }
 
 function gatewayErrorCode(error: unknown): string {
+  if (error instanceof InvalidToolDefinitionError) return "invalid_tool_definition";
+  if (error instanceof ToolProtocolError) return "tool_protocol_error";
   if (isAuthenticationRequiredError(error)) return "m365_login_required";
   if (error instanceof GraphCopilotError) {
     return error.statusCode === 429 ? "rate_limit_exceeded" : `graph_${error.statusCode}`;
@@ -250,6 +333,7 @@ function errorLogFields(error: unknown): LogFields {
       upstream_status: error.statusCode,
       ...(error.retryAfter !== undefined ? { retry_after: error.retryAfter } : {}),
     } : {}),
+    ...(error instanceof ToolProtocolError ? { protocol_reason: error.reason } : {}),
   };
 }
 
@@ -259,6 +343,174 @@ function elapsedMs(startedAt: number): number {
 
 function requestId(request: FastifyRequest): string {
   return String(request.id);
+}
+
+function latestGraphText(response: GraphChatResponse): string {
+  for (let index = (response.messages?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const text = response.messages?.[index]?.text;
+    if (typeof text === "string" && text.trim() !== "") return text;
+  }
+  throw new ToolProtocolError("invalid_shape");
+}
+
+function normalizeTools(tools: z.infer<typeof functionToolSchema>[]): OpenAIFunctionTool[] {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.function.name,
+      ...(tool.function.description !== undefined ? { description: tool.function.description } : {}),
+      parameters: tool.function.parameters,
+      ...(tool.function.strict !== undefined ? { strict: tool.function.strict } : {}),
+    },
+  }));
+}
+
+function createFunctionCall(decision: Extract<ToolDecision, { kind: "tool_call" }>): OpenAIFunctionToolCall {
+  return {
+    id: `call_${crypto.randomUUID().replaceAll("-", "")}`,
+    type: "function",
+    function: {
+      name: decision.name,
+      arguments: JSON.stringify(decision.arguments),
+    },
+  };
+}
+
+async function resolveToolDecision(
+  dependencies: GatewayDependencies,
+  accessToken: string,
+  conversation: GraphConversation,
+  initialPrompt: string,
+  protocol: ToolProtocol,
+  signal: AbortSignal,
+  logger: GatewayLogger,
+  requestIdentifier: string,
+): Promise<{ decision: ToolDecision; correctionAttempted: boolean }> {
+  const firstResponse = await dependencies.copilot.chat(accessToken, conversation.id, initialPrompt, signal);
+  try {
+    return { decision: protocol.parse(latestGraphText(firstResponse)), correctionAttempted: false };
+  } catch (error) {
+    if (!(error instanceof ToolProtocolError)) throw error;
+    logger.warn("tool_protocol_retry", {
+      request_id: requestIdentifier,
+      protocol_reason: error.reason,
+    });
+    const corrected = await dependencies.copilot.chat(
+      accessToken,
+      conversation.id,
+      protocol.correctionPrompt(error),
+      signal,
+    );
+    return { decision: protocol.parse(latestGraphText(corrected)), correctionAttempted: true };
+  }
+}
+
+async function toolChatCompletion(
+  dependencies: GatewayDependencies,
+  input: z.infer<typeof chatRequestSchema>,
+  tools: OpenAIFunctionTool[],
+  choice: Exclude<OpenAIToolChoice, "none">,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  activeStreams: Set<() => void>,
+  logger: GatewayLogger,
+  startedAt: number,
+): Promise<FastifyReply | void> {
+  const id = requestId(request);
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  const timeout = setTimeout(abort, dependencies.config.graphStreamIdleTimeoutMs);
+  let downstreamStarted = false;
+  activeStreams.add(abort);
+  request.raw.once("aborted", abort);
+
+  try {
+    const protocol = createToolProtocol(tools, choice, crypto.randomUUID());
+    const token = await dependencies.auth.getAccessToken();
+    logger.debug("auth_succeeded", { request_id: id, duration_ms: elapsedMs(startedAt) });
+    const conversation = await dependencies.copilot.createConversation(token, controller.signal);
+    logger.debug("graph_conversation_created", { request_id: id, duration_ms: elapsedMs(startedAt) });
+    const prompt = flattenMessagesWithTools(input.messages, tools, choice, protocol.nonce);
+    const result = await resolveToolDecision(
+      dependencies,
+      token,
+      conversation,
+      prompt,
+      protocol,
+      controller.signal,
+      logger,
+      id,
+    );
+    clearTimeout(timeout);
+
+    const decision = result.decision;
+    const outputChars = decision.kind === "final"
+      ? decision.content.length
+      : JSON.stringify(decision.arguments).length;
+    let completion: OpenAIChatCompletion;
+    let chunks: OpenAIChatCompletionChunk[];
+    if (decision.kind === "tool_call") {
+      const toolCall = createFunctionCall(decision);
+      completion = toOpenAIToolCompletion(conversation, toolCall);
+      chunks = bufferedToolCallChunks(conversation, toolCall);
+    } else {
+      completion = toOpenAICompletion(conversation, { messages: [{ text: decision.content }] });
+      chunks = bufferedTextChunks(conversation, decision.content);
+    }
+    if (input.stream !== true) {
+      logger.info("request_completed", {
+        request_id: id,
+        mode: "sync_tool",
+        status: 200,
+        duration_ms: elapsedMs(startedAt),
+        outcome: decision.kind,
+        correction_attempted: result.correctionAttempted,
+        output_chars: outputChars,
+      });
+      return reply.send(completion);
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "X-Request-Id": id,
+    });
+    downstreamStarted = true;
+    for (const chunk of chunks) {
+      await writeSse(reply.raw, serializeSseData(chunk), controller.signal);
+    }
+    await writeSse(reply.raw, serializeSseData("[DONE]"), controller.signal);
+    reply.raw.end();
+    logger.info("request_completed", {
+      request_id: id,
+      mode: "stream_tool",
+      status: 200,
+      duration_ms: elapsedMs(startedAt),
+      outcome: decision.kind,
+      correction_attempted: result.correctionAttempted,
+      output_chars: outputChars,
+    });
+    return reply;
+  } catch (error) {
+    logger.error("request_failed", {
+      request_id: id,
+      mode: input.stream === true ? "stream_tool" : "sync_tool",
+      duration_ms: elapsedMs(startedAt),
+      ...errorLogFields(error),
+    });
+    if (downstreamStarted) {
+      if (!reply.raw.destroyed) reply.raw.destroy();
+      return;
+    }
+    return sendGatewayError(reply, error);
+  } finally {
+    clearTimeout(timeout);
+    request.raw.removeListener("aborted", abort);
+    activeStreams.delete(abort);
+  }
 }
 
 async function streamChatCompletion(
@@ -528,19 +780,41 @@ export function buildServer(dependencies: GatewayDependencies): FastifyInstance 
       message_count: input.messages.length,
       tools_requested: Boolean(input.tools && input.tools.length > 0),
     });
-    if (input.tools && input.tools.length > 0) {
+    const tools = normalizeTools(input.tools ?? []);
+    const choice = input.tool_choice ?? "auto";
+    if (tools.length === 0 && choice !== "auto" && choice !== "none") {
+      const error = new InvalidToolDefinitionError("tool_choice requires at least one function tool.");
       logger.warn("request_rejected", {
         request_id: id,
         method: request.method,
-        reason: "tools_not_supported",
+        reason: "invalid_tool_definition",
       });
-      return reply.code(400).send({
-        error: {
-          message: "OpenAI tool calling is planned but is not implemented in phase 1.",
-          type: "invalid_request_error",
-          code: "tools_not_supported",
-        },
-      });
+      return sendGatewayError(reply, error);
+    }
+    if (tools.length > 0 && choice === "none") {
+      try {
+        validateToolDefinitions(tools);
+      } catch (error) {
+        logger.warn("request_rejected", {
+          request_id: id,
+          method: request.method,
+          reason: "invalid_tool_definition",
+        });
+        return sendGatewayError(reply, error);
+      }
+    }
+    if (tools.length > 0 && choice !== "none") {
+      return toolChatCompletion(
+        dependencies,
+        input,
+        tools,
+        choice,
+        request,
+        reply,
+        activeStreams,
+        logger,
+        startedAt,
+      );
     }
 
     if (input.stream === true) {
