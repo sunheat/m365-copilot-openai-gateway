@@ -36,7 +36,10 @@ scope.
 ## 3. Request validation
 
 Only function tools are accepted. Tool names must be unique and match
-`^[A-Za-z0-9_-]{1,64}$`. Each `parameters` value must be a valid JSON Schema.
+`^[A-Za-z0-9_-]{1,64}$`. Each `parameters` value must be a valid JSON Schema
+using the gateway's supported draft-07 vocabulary. Explicit newer dialects and
+keywords that the validator cannot enforce are rejected instead of being
+silently ignored.
 
 `tool_choice` behavior:
 

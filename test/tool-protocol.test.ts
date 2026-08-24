@@ -95,6 +95,34 @@ describe("createToolProtocol", () => {
       .toThrowError(InvalidToolDefinitionError);
   });
 
+  it("rejects unsupported JSON Schema dialects and keywords", () => {
+    const unsupportedKeyword: OpenAIFunctionTool = {
+      type: "function",
+      function: {
+        name: "modern_constraints",
+        parameters: {
+          type: "object",
+          dependentRequired: { credit_card: ["billing_address"] },
+        },
+      },
+    };
+    const unsupportedDialect: OpenAIFunctionTool = {
+      type: "function",
+      function: {
+        name: "modern_dialect",
+        parameters: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+        },
+      },
+    };
+
+    expect(() => createToolProtocol([unsupportedKeyword], "auto", "nonce"))
+      .toThrowError(InvalidToolDefinitionError);
+    expect(() => createToolProtocol([unsupportedDialect], "auto", "nonce"))
+      .toThrowError(InvalidToolDefinitionError);
+  });
+
   it("builds a bounded correction prompt without echoing model output", () => {
     const protocol = createToolProtocol(tools, "auto", "nonce-123");
     const prompt = protocol.correctionPrompt(new ToolProtocolError("invalid_arguments"));

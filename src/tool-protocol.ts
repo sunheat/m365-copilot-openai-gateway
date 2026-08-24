@@ -34,7 +34,7 @@ function compileToolValidators(tools: OpenAIFunctionTool[]): Map<string, Validat
     throw new InvalidToolDefinitionError("At least one function tool is required.");
   }
 
-  const ajv = new Ajv({ allErrors: true, strict: false });
+  const ajv = new Ajv({ allErrors: true, strict: false, strictSchema: true });
   formatsModule.default(ajv);
   const validators = new Map<string, ValidateFunction>();
   for (const tool of tools) {
