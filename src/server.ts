@@ -418,30 +418,65 @@ async function toolChatCompletion(
 ): Promise<FastifyReply | void> {
   const id = requestId(request);
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  const timeout = setTimeout(abort, dependencies.config.graphStreamIdleTimeoutMs);
+  let clientDisconnected = false;
   let downstreamStarted = false;
-  activeStreams.add(abort);
-  request.raw.once("aborted", abort);
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  let rejectCancellation: ((error: unknown) => void) | undefined;
+  const abortForCancellation = (): void => {
+    controller.abort();
+    rejectCancellation?.(new StreamClientDisconnectedError());
+  };
+  const onClientDisconnect = (): void => {
+    clientDisconnected = true;
+    abortForCancellation();
+  };
+  const cleanup = (): void => {
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+    request.raw.removeListener("aborted", onClientDisconnect);
+    reply.raw.removeListener("close", onClientDisconnect);
+    activeStreams.delete(abortForCancellation);
+  };
+  activeStreams.add(abortForCancellation);
+  request.raw.once("aborted", onClientDisconnect);
+  reply.raw.once("close", onClientDisconnect);
 
   try {
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        controller.abort();
+        reject(new StreamIdleTimeoutError());
+      }, dependencies.config.graphStreamIdleTimeoutMs);
+    });
+    const cancelled = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+    const raceWithCancellation = <T>(operation: Promise<T>): Promise<T> => Promise.race([
+      operation,
+      timeout,
+      cancelled,
+    ]);
+
     const protocol = createToolProtocol(tools, choice, crypto.randomUUID());
-    const token = await dependencies.auth.getAccessToken();
+    const token = await raceWithCancellation(dependencies.auth.getAccessToken());
     logger.debug("auth_succeeded", { request_id: id, duration_ms: elapsedMs(startedAt) });
-    const conversation = await dependencies.copilot.createConversation(token, controller.signal);
+    const conversation = await raceWithCancellation(
+      dependencies.copilot.createConversation(token, controller.signal),
+    );
     logger.debug("graph_conversation_created", { request_id: id, duration_ms: elapsedMs(startedAt) });
     const prompt = flattenMessagesWithTools(input.messages, tools, choice, protocol.nonce);
-    const result = await resolveToolDecision(
-      dependencies,
-      token,
-      conversation,
-      prompt,
-      protocol,
-      controller.signal,
-      logger,
-      id,
+    const result = await raceWithCancellation(
+      resolveToolDecision(
+        dependencies,
+        token,
+        conversation,
+        prompt,
+        protocol,
+        controller.signal,
+        logger,
+        id,
+      ),
     );
-    clearTimeout(timeout);
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
 
     const decision = result.decision;
     const outputChars = decision.kind === "final"
@@ -467,6 +502,7 @@ async function toolChatCompletion(
         correction_attempted: result.correctionAttempted,
         output_chars: outputChars,
       });
+      cleanup();
       return reply.send(completion);
     }
 
@@ -493,8 +529,18 @@ async function toolChatCompletion(
       correction_attempted: result.correctionAttempted,
       output_chars: outputChars,
     });
+    cleanup();
     return reply;
   } catch (error) {
+    if (clientDisconnected || error instanceof StreamClientDisconnectedError) {
+      logger.debug("tool_request_cancelled", {
+        request_id: id,
+        mode: input.stream === true ? "stream_tool" : "sync_tool",
+        duration_ms: elapsedMs(startedAt),
+        reason: clientDisconnected ? "client_disconnected" : "server_shutdown",
+      });
+      return;
+    }
     logger.error("request_failed", {
       request_id: id,
       mode: input.stream === true ? "stream_tool" : "sync_tool",
@@ -507,9 +553,7 @@ async function toolChatCompletion(
     }
     return sendGatewayError(reply, error);
   } finally {
-    clearTimeout(timeout);
-    request.raw.removeListener("aborted", abort);
-    activeStreams.delete(abort);
+    cleanup();
   }
 }
 

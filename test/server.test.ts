@@ -394,6 +394,102 @@ describe("gateway server", () => {
     await app.close();
   });
 
+  it("bounds buffered tool token acquisition with the request deadline", async () => {
+    const stalledAuth: AuthService = {
+      ...auth,
+      getAccessToken: async () => new Promise<string>(() => undefined),
+    };
+    const app = buildServer({
+      config: { ...config, graphStreamIdleTimeoutMs: 10 },
+      auth: stalledAuth,
+      copilot,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "any",
+        tools: [weatherTool],
+        messages: [{ role: "user", content: "Use the tool." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    await app.close();
+  });
+
+  it("cancels buffered token acquisition before Fastify waits during shutdown", async () => {
+    let tokenRequested = false;
+    const stalledAuth: AuthService = {
+      ...auth,
+      getAccessToken: async () => {
+        tokenRequested = true;
+        return new Promise<string>(() => undefined);
+      },
+    };
+    const app = buildServer({ config, auth: stalledAuth, copilot });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address.");
+
+    const request = fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "any",
+        tools: [weatherTool],
+        messages: [{ role: "user", content: "Use the tool." }],
+      }),
+    }).catch((error: unknown) => error);
+    await expect.poll(() => tokenRequested, { timeout: 1_000 }).toBe(true);
+
+    await app.close();
+    await request;
+  });
+
+  it("aborts a buffered tool call when the downstream response closes", async () => {
+    let toolChatStarted = false;
+    let upstreamAborted = false;
+    const cancellableCopilot: CopilotClient = {
+      ...copilot,
+      chat: async (_token, _conversationId, _prompt, signal) => new Promise((_resolve, reject) => {
+        if (!signal) throw new Error("Buffered tool chat did not receive an AbortSignal.");
+        toolChatStarted = true;
+        const onAbort = (): void => {
+          upstreamAborted = true;
+          reject(new Error("aborted"));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    };
+    const app = buildServer({ config, auth, copilot: cancellableCopilot });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address.");
+
+    const clientAbort = new AbortController();
+    const request = fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "any",
+        tools: [weatherTool],
+        messages: [{ role: "user", content: "Use the tool." }],
+      }),
+      signal: clientAbort.signal,
+    });
+    await expect.poll(() => toolChatStarted, { timeout: 1_000 }).toBe(true);
+    clientAbort.abort();
+
+    await expect(request).rejects.toThrow();
+    await expect.poll(() => upstreamAborted, { timeout: 1_000 }).toBe(true);
+    await app.close();
+  });
+
   it("allows an empty tools list for a text-only request", async () => {
     const app = buildServer({ config, auth, copilot });
     const response = await app.inject({
