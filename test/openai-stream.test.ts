@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createStreamProjector, serializeSseData, StreamProjectionError } from "../src/openai-stream.js";
+import {
+  bufferedTextChunks,
+  bufferedToolCallChunks,
+  createStreamProjector,
+  serializeSseData,
+  StreamProjectionError,
+} from "../src/openai-stream.js";
 
 describe("createStreamProjector", () => {
   it("emits stable role and metadata, then projects cumulative text suffixes", () => {
@@ -41,5 +47,32 @@ describe("createStreamProjector", () => {
     expect(serializeSseData("[DONE]")).toBe("data: [DONE]\n\n");
     expect(serializeSseData({ error: { message: "safe", type: "api_error", code: "stream_error" } }))
       .toBe('data: {"error":{"message":"safe","type":"api_error","code":"stream_error"}}\n\n');
+  });
+});
+
+describe("buffered compatibility chunks", () => {
+  it("emits complete text using the normal stop sequence", () => {
+    const chunks = bufferedTextChunks({ id: "conversation-123" }, "Final answer", 1_780_000_000);
+    expect(chunks[0]?.choices[0]?.delta).toEqual({ role: "assistant", content: "" });
+    expect(chunks[1]?.choices[0]?.delta).toEqual({ content: "Final answer" });
+    expect(chunks[2]?.choices[0]?.finish_reason).toBe("stop");
+  });
+
+  it("emits one indexed function call and a tool_calls finish reason", () => {
+    const chunks = bufferedToolCallChunks(
+      { id: "conversation-123" },
+      {
+        id: "call-123",
+        type: "function",
+        function: { name: "get_weather", arguments: '{"city":"Sydney"}' },
+      },
+      1_780_000_000,
+    );
+    expect(chunks[1]?.choices[0]?.delta.tool_calls?.[0]).toMatchObject({
+      index: 0,
+      id: "call-123",
+      function: { name: "get_weather", arguments: '{"city":"Sydney"}' },
+    });
+    expect(chunks[2]?.choices[0]?.finish_reason).toBe("tool_calls");
   });
 });

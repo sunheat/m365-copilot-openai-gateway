@@ -13,14 +13,18 @@ Implemented locally:
 
 - `GET /health`
 - `GET /v1/models` exposing `m365-copilot-preview`
-- `POST /v1/chat/completions` for text-only requests, including native SSE streaming when `stream: true`
+- `POST /v1/chat/completions` for text and function-tool requests
+- OpenAI-compatible `tools`, `tool_choice`, `message.tool_calls`, and streamed `delta.tool_calls`
 - Microsoft Entra delegated browser sign-in using authorization code with PKCE and an encrypted, current-user MSAL token cache on Windows
 - A new Graph Copilot conversation per request and web grounding disabled on every turn
 
-The streaming path calls Microsoft Graph's native `chatOverStream` endpoint, converts cumulative snapshots into OpenAI-compatible content deltas, and ends successful responses with a `finish_reason` chunk followed by `[DONE]`. `stream_options.include_usage` is accepted but no fabricated token usage is emitted because Graph does not provide token counts. OpenAI tool calling remains unsupported and needs a separate gateway-side protocol.
+The text-only streaming path calls Microsoft Graph's native `chatOverStream` endpoint, converts cumulative snapshots into OpenAI-compatible content deltas, and ends successful responses with a `finish_reason` chunk followed by `[DONE]`. Tool-enabled turns use a strict gateway-side text protocol because Graph does not expose native tool calling; those responses are validated and fully buffered before OpenAI-compatible output is emitted. `stream_options.include_usage` is accepted but no fabricated token usage is emitted because Graph does not provide token counts.
 
 The proposed native Graph-to-OpenAI streaming architecture is documented in
 [Phase 2 SSE Streaming Design](docs/phase-2-sse-streaming-design.md).
+
+The implemented text-protocol bridge for IDE tool loops is documented in
+[Phase 3 OpenAI Tool-Calling Compatibility Design](docs/phase-3-tool-calling-design.md).
 
 ## Local setup
 
